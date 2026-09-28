@@ -6,11 +6,11 @@ from datetime import datetime
 from telebot import types
 
 # ============ AYARLAR ============
-API_BASE = "https://logsuzlarsystem.iceiy.com/sorgu"
+API_BASE = "https://apiv2.ajaxsystems.fun"
 ADMIN_ID = 8727961464
 MAIN_BOT_TOKEN = "8846795660:AAEoeH4K-5BMjZMQCTYvoswICQRCcDJBIko"
+DESTEK_KANAL = "logsuzlarpanel"  # @ olmadan yazılır
 
-# Vercel'de /tmp yazılabilir
 DATA_DIR = "/tmp/sorgu_bot_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -28,7 +28,7 @@ DEFAULT_AYARLAR = {
     "bakim_modu": False,
     "bakim_mesaji": "🔧 Bot şu anda bakımda. Lütfen daha sonra tekrar deneyin.",
     "son_duyuru": "",
-    "versiyon": "2.0.0",
+    "versiyon": "2.2.0",
     "son_yenileme": "2025-01-01 00:00:00"
 }
 
@@ -78,18 +78,21 @@ def kullanici_kaydet(user_id, username, ad):
 # ============ API İSTEK ============
 def api_istek(url):
     try:
-        headers = {"User-Agent": USER_AGENTS[hash(url) % len(USER_AGENTS)]}
-        r = requests.get(url, timeout=20, headers=headers)
+        headers = {
+            "User-Agent": USER_AGENTS[hash(url) % len(USER_AGENTS)],
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+        }
+        r = requests.get(url, timeout=25, headers=headers)
         try:
             return r.json()
         except:
-            return {"success": False, "raw": r.text[:2000]}
+            return {"success": False, "raw": r.text[:2000], "status": r.status_code}
     except Exception as e:
         return {"success": False, "message": f"API hatası: {str(e)}"}
 
 
 def json_to_text(baslik, data):
-    """JSON veriyi okunabilir metne çevirir"""
     metin = f"📌 *{baslik}*\n"
     metin += f"🕐 `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n"
     metin += "─" * 30 + "\n\n"
@@ -112,6 +115,21 @@ def json_to_text(baslik, data):
 
     metin += format_dict(data)
     return metin
+
+
+def json_dosya_olustur(baslik, data):
+    """JSON verisini geçici dosyaya yazar"""
+    dosya_adi = f"{DATA_DIR}/sonuc_{int(datetime.now().timestamp())}.json"
+    icerik = {
+        "baslik": baslik,
+        "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "api": API_BASE,
+        "destek_kanal": f"@{DESTEK_KANAL}",
+        "sonuc": data
+    }
+    with open(dosya_adi, "w", encoding="utf-8") as f:
+        json.dump(icerik, f, ensure_ascii=False, indent=2)
+    return dosya_adi
 
 
 # ============ MENÜLER ============
@@ -143,6 +161,12 @@ def ana_menu(user_id, is_clone=False):
     )
     kb.add(types.InlineKeyboardButton("🗺️ Ada Parsel", callback_data="menu_adaparsel"))
     kb.add(types.InlineKeyboardButton("ℹ️ Hakkında", callback_data="menu_hakkinda"))
+
+    # ===== DESTEK KANAL BUTONU (SORGULARIN ALTINDA) =====
+    kb.add(types.InlineKeyboardButton(
+        "📢 Destek Kanalı",
+        url=f"https://t.me/{DESTEK_KANAL}"
+    ))
 
     if user_id == ADMIN_ID and not is_clone:
         kb.add(types.InlineKeyboardButton("👑 ADMİN PANEL", callback_data="admin_panel"))
@@ -180,6 +204,16 @@ def clone_menu():
     return kb
 
 
+def sonuc_menu():
+    """Sorgu sonucu altındaki butonlar"""
+    kb = types.InlineKeyboardMarkup(row_width=1)
+    kb.add(types.InlineKeyboardButton(
+        "📢 Destek Kanalı",
+        url=f"https://t.me/{DESTEK_KANAL}"
+    ))
+    return kb
+
+
 # ============ SORGU MENÜLERİ ============
 SORGU_MENU = {
     "menu_tc": ("📇 *TC Sorgu*\n\nTC kimlik numarasını yazın (11 hane):", "tc"),
@@ -199,44 +233,44 @@ SORGU_MENU = {
 
 
 def sorgu_url_uret(tip, text):
+    """Ajax Systems API endpoint yapısı"""
     if tip == "tc":
-        return f"{API_BASE}/tc.php?tc={text}", f"TC Sorgu: {text}"
+        return f"{API_BASE}/tc?tc={text}", f"TC Sorgu: {text}"
     elif tip == "tcpro":
-        return f"{API_BASE}/tcpro.php?tc={text}", f"TC Pro: {text}"
+        return f"{API_BASE}/tcpro?tc={text}", f"TC Pro: {text}"
     elif tip == "adsoyad":
         p = text.split()
         if len(p) < 2:
             return None, "❌ `AD SOYAD` şeklinde yazın!"
-        return f"{API_BASE}/adsoyad.php?ad={p[0]}&soyad={p[1]}", f"Ad Soyad: {p[0]} {p[1]}"
+        return f"{API_BASE}/adsoyad?ad={p[0]}&soyad={p[1]}", f"Ad Soyad: {p[0]} {p[1]}"
     elif tip == "aile":
-        return f"{API_BASE}/aile.php?tc={text}", f"Aile: {text}"
+        return f"{API_BASE}/aile?tc={text}", f"Aile: {text}"
     elif tip == "ailepro":
-        return f"{API_BASE}/ailepro.php?tc={text}", f"Aile Pro: {text}"
+        return f"{API_BASE}/ailepro?tc={text}", f"Aile Pro: {text}"
     elif tip == "sulale":
-        return f"{API_BASE}/sulale.php?tc={text}", f"Sülale: {text}"
+        return f"{API_BASE}/sulale?tc={text}", f"Sülale: {text}"
     elif tip == "isyeri":
-        return f"{API_BASE}/isyeri.php?tc={text}", f"İşyeri: {text}"
+        return f"{API_BASE}/isyeri?tc={text}", f"İşyeri: {text}"
     elif tip == "tcgsm":
-        return f"{API_BASE}/tcgsm.php?tc={text}", f"TC→GSM: {text}"
+        return f"{API_BASE}/tcgsm?tc={text}", f"TC→GSM: {text}"
     elif tip == "gsmtc":
-        return f"{API_BASE}/gsmtc.php?gsm={text}", f"GSM→TC: {text}"
+        return f"{API_BASE}/gsmtc?gsm={text}", f"GSM→TC: {text}"
     elif tip == "eokul":
-        return f"{API_BASE}/eokul.php?tc={text}", f"E-Okul: {text}"
+        return f"{API_BASE}/eokul?tc={text}", f"E-Okul: {text}"
     elif tip == "adres":
-        return f"{API_BASE}/adres.php?tc={text}", f"Adres: {text}"
+        return f"{API_BASE}/adres?tc={text}", f"Adres: {text}"
     elif tip == "tapu":
-        return f"{API_BASE}/tapu.php?tc={text}", f"Tapu: {text}"
+        return f"{API_BASE}/tapu?tc={text}", f"Tapu: {text}"
     elif tip == "adaparsel":
         p = text.split()
         if len(p) < 2:
             return None, "❌ `İL İLÇE` şeklinde yazın!"
-        return f"{API_BASE}/adaparsel.php?il={p[0]}&ilce={p[1]}", f"Ada Parsel: {p[0]} {p[1]}"
+        return f"{API_BASE}/adaparsel?il={p[0]}&ilce={p[1]}", f"Ada Parsel: {p[0]} {p[1]}"
     return None, "❌ Bilinmeyen sorgu tipi"
 
 
 # ============ BOT OLUŞTUR ============
 def create_bot(token, is_clone=False):
-    """Her token için ayrı bot instance oluşturur - sanal ortamda çalışır"""
     bot = telebot.TeleBot(token, threaded=False, parse_mode=None)
 
     # ---- START ----
@@ -281,7 +315,6 @@ def create_bot(token, is_clone=False):
             bot.answer_callback_query(call.id, "🔧 Bot bakımda!")
             return
 
-        # Menü geri
         if data == "menu_geri":
             bot.edit_message_text("👋 *Ana Menü*\n\nSorgu seçin:",
                                   call.message.chat.id, call.message.message_id,
@@ -289,21 +322,26 @@ def create_bot(token, is_clone=False):
                                   reply_markup=ana_menu(uid, is_clone))
             return
 
+        # ===== HAKKINDA =====
         if data == "menu_hakkinda":
             metin = (
                 "ℹ️ *Hakkında*\n\n"
                 f"🤖 Bot: Gelişmiş Sorgu Botu\n"
                 f"📌 Versiyon: `{a['versiyon']}`\n"
-                f"🌐 API: `{API_BASE}`\n\n"
+                f"🌐 API: @apiservicesonline\n"
+                f"📢 Destek: @{DESTEK_KANAL}\n\n"
                 "Bu bot eğitim amaçlıdır."
             )
-            kb = types.InlineKeyboardMarkup()
+            kb = types.InlineKeyboardMarkup(row_width=1)
+            kb.add(types.InlineKeyboardButton(
+                "📢 Destek Kanalı",
+                url=f"https://t.me/{DESTEK_KANAL}"
+            ))
             kb.add(types.InlineKeyboardButton("🔙 Geri", callback_data="menu_geri"))
             bot.edit_message_text(metin, call.message.chat.id, call.message.message_id,
                                   parse_mode="Markdown", reply_markup=kb)
             return
 
-        # Sorgu menüleri
         if data in SORGU_MENU:
             metin, tip = SORGU_MENU[data]
             bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -432,24 +470,37 @@ def create_bot(token, is_clone=False):
 
         try:
             data = api_istek(url)
-            metin = json_to_text(baslik, data)
 
-            # Mesaj çok uzunsa parçala
-            if len(metin) > 4000:
-                parcalar = [metin[i:i + 4000] for i in range(0, len(metin), 4000)]
-                bot.delete_message(message.chat.id, islem.message_id)
-                for p in parcalar:
-                    try:
-                        bot.send_message(message.chat.id, p, parse_mode="Markdown")
-                    except:
-                        bot.send_message(message.chat.id, p)
-            else:
-                bot.edit_message_text(metin, message.chat.id, islem.message_id,
-                                      parse_mode="Markdown")
+            # ===== JSON DOSYASI OLARAK GÖNDER =====
+            json_dosya = json_dosya_olustur(baslik, data)
+
+            bot.delete_message(message.chat.id, islem.message_id)
+
+            with open(json_dosya, "rb") as f:
+                bot.send_document(
+                    message.chat.id,
+                    f,
+                    caption=(
+                        f"✅ *{baslik}*\n"
+                        f"📁 Sonuç JSON dosyasında.\n"
+                        f"📢 Destek: @{DESTEK_KANAL}"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=sonuc_menu()
+                )
+
+            # Geçici dosyayı sil
+            try:
+                os.remove(json_dosya)
+            except:
+                pass
 
         except Exception as e:
-            bot.edit_message_text(f"❌ Hata: {str(e)}",
-                                  message.chat.id, islem.message_id)
+            try:
+                bot.edit_message_text(f"❌ Hata: {str(e)}",
+                                      message.chat.id, islem.message_id)
+            except:
+                bot.send_message(message.chat.id, f"❌ Hata: {str(e)}")
 
     # ---- ADMİN İŞLEMLERİ ----
     def duyuru_gonder(message):
