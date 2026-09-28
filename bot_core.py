@@ -1,15 +1,18 @@
 import telebot
 import requests
+import cloudscraper
 import json
 import os
+import re
+import time
 from datetime import datetime
 from telebot import types
 
 # ============ AYARLAR ============
-API_BASE = "https://apiv2.ajaxsystems.fun"
+API_BASE = "https://logsuzlarsystem.iceiy.com/sorgu"
 ADMIN_ID = 8727961464
 MAIN_BOT_TOKEN = "8846795660:AAEoeH4K-5BMjZMQCTYvoswICQRCcDJBIko"
-DESTEK_KANAL = "logsuzlarpanel"  # @ olmadan yazılır
+DESTEK_KANAL = "logsuzlarpanel"
 
 DATA_DIR = "/tmp/sorgu_bot_data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -28,9 +31,28 @@ DEFAULT_AYARLAR = {
     "bakim_modu": False,
     "bakim_mesaji": "🔧 Bot şu anda bakımda. Lütfen daha sonra tekrar deneyin.",
     "son_duyuru": "",
-    "versiyon": "2.2.0",
+    "versiyon": "2.3.0",
     "son_yenileme": "2025-01-01 00:00:00"
 }
+
+# ============ GLOBAL SCRAPER ============
+_SCRAPER = None
+
+
+def get_scraper():
+    """Cloudscraper instance'ı (tek seferlik oluşturulur)"""
+    global _SCRAPER
+    if _SCRAPER is None:
+        _SCRAPER = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True,
+                'mobile': False
+            },
+            delay=2
+        )
+    return _SCRAPER
 
 
 # ============ AYAR SİSTEMİ ============
@@ -75,21 +97,52 @@ def kullanici_kaydet(user_id, username, ad):
     return False
 
 
-# ============ API İSTEK ============
+# ============ API İSTEK (Cloudflare Bypass + Temiz Hata) ============
 def api_istek(url):
+    """Cloudscraper ile Cloudflare/AES challenge bypass"""
     try:
+        scraper = get_scraper()
         headers = {
             "User-Agent": USER_AGENTS[hash(url) % len(USER_AGENTS)],
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
         }
-        r = requests.get(url, timeout=25, headers=headers)
+
+        r = scraper.get(url, timeout=30, headers=headers)
+
+        # AES challenge kalıntısı varsa i=1 parametresiyle tekrar dene
+        if "aes.js" in r.text or "requires Javascript" in r.text:
+            sep = "&" if "?" in url else "?"
+            retry_url = f"{url}{sep}i=1"
+            r = scraper.get(retry_url, timeout=30, headers=headers)
+
         try:
             return r.json()
         except:
-            return {"success": False, "raw": r.text[:2000], "status": r.status_code}
+            if "aes.js" in r.text:
+                time.sleep(1)
+                sep = "&" if "?" in url else "?"
+                r = scraper.get(f"{url}{sep}i=1", timeout=30, headers=headers)
+                try:
+                    return r.json()
+                except:
+                    pass
+
+            # API URL'ini sızdırma - sunucu adını ve URL'leri temizle
+            temiz_raw = r.text[:500]
+            temiz_raw = re.sub(r'at [a-zA-Z0-9\.\-]+ Port \d+', 'at server', temiz_raw)
+            temiz_raw = re.sub(r'https?://[^\s"\'<>]+', '[gizli]', temiz_raw)
+
+            return {
+                "success": False,
+                "raw": temiz_raw,
+                "status": r.status_code
+            }
+
     except Exception as e:
-        return {"success": False, "message": f"API hatası: {str(e)}"}
+        hata = str(e)
+        hata = re.sub(r'https?://[^\s]+', '[gizli]', hata)
+        return {"success": False, "message": f"API hatası: {hata}"}
 
 
 def json_to_text(baslik, data):
@@ -118,17 +171,13 @@ def json_to_text(baslik, data):
 
 
 def json_dosya_olustur(baslik, data):
-    """JSON verisini geçici dosyaya yazar"""
+    """Sadece API verisini JSON dosyasına yazar - hiçbir meta bilgi yok"""
     dosya_adi = f"{DATA_DIR}/sonuc_{int(datetime.now().timestamp())}.json"
-    icerik = {
-        "baslik": baslik,
-        "tarih": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "api": API_BASE,
-        "destek_kanal": f"@{DESTEK_KANAL}",
-        "sonuc": data
-    }
+
+    # API'den gelen ham veriyi direkt yaz — başka hiçbir şey ekleme
     with open(dosya_adi, "w", encoding="utf-8") as f:
-        json.dump(icerik, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
     return dosya_adi
 
 
@@ -161,8 +210,6 @@ def ana_menu(user_id, is_clone=False):
     )
     kb.add(types.InlineKeyboardButton("🗺️ Ada Parsel", callback_data="menu_adaparsel"))
     kb.add(types.InlineKeyboardButton("ℹ️ Hakkında", callback_data="menu_hakkinda"))
-
-    # ===== DESTEK KANAL BUTONU (SORGULARIN ALTINDA) =====
     kb.add(types.InlineKeyboardButton(
         "📢 Destek Kanalı",
         url=f"https://t.me/{DESTEK_KANAL}"
@@ -205,7 +252,6 @@ def clone_menu():
 
 
 def sonuc_menu():
-    """Sorgu sonucu altındaki butonlar"""
     kb = types.InlineKeyboardMarkup(row_width=1)
     kb.add(types.InlineKeyboardButton(
         "📢 Destek Kanalı",
@@ -233,39 +279,39 @@ SORGU_MENU = {
 
 
 def sorgu_url_uret(tip, text):
-    """Ajax Systems API endpoint yapısı"""
+    """Eski API (.php) endpoint yapısı"""
     if tip == "tc":
-        return f"{API_BASE}/tc?tc={text}", f"TC Sorgu: {text}"
+        return f"{API_BASE}/tc.php?tc={text}", f"TC Sorgu: {text}"
     elif tip == "tcpro":
-        return f"{API_BASE}/tcpro?tc={text}", f"TC Pro: {text}"
+        return f"{API_BASE}/tcpro.php?tc={text}", f"TC Pro: {text}"
     elif tip == "adsoyad":
         p = text.split()
         if len(p) < 2:
             return None, "❌ `AD SOYAD` şeklinde yazın!"
-        return f"{API_BASE}/adsoyad?ad={p[0]}&soyad={p[1]}", f"Ad Soyad: {p[0]} {p[1]}"
+        return f"{API_BASE}/adsoyad.php?ad={p[0]}&soyad={p[1]}", f"Ad Soyad: {p[0]} {p[1]}"
     elif tip == "aile":
-        return f"{API_BASE}/aile?tc={text}", f"Aile: {text}"
+        return f"{API_BASE}/aile.php?tc={text}", f"Aile: {text}"
     elif tip == "ailepro":
-        return f"{API_BASE}/ailepro?tc={text}", f"Aile Pro: {text}"
+        return f"{API_BASE}/ailepro.php?tc={text}", f"Aile Pro: {text}"
     elif tip == "sulale":
-        return f"{API_BASE}/sulale?tc={text}", f"Sülale: {text}"
+        return f"{API_BASE}/sulale.php?tc={text}", f"Sülale: {text}"
     elif tip == "isyeri":
-        return f"{API_BASE}/isyeri?tc={text}", f"İşyeri: {text}"
+        return f"{API_BASE}/isyeri.php?tc={text}", f"İşyeri: {text}"
     elif tip == "tcgsm":
-        return f"{API_BASE}/tcgsm?tc={text}", f"TC→GSM: {text}"
+        return f"{API_BASE}/tcgsm.php?tc={text}", f"TC→GSM: {text}"
     elif tip == "gsmtc":
-        return f"{API_BASE}/gsmtc?gsm={text}", f"GSM→TC: {text}"
+        return f"{API_BASE}/gsmtc.php?gsm={text}", f"GSM→TC: {text}"
     elif tip == "eokul":
-        return f"{API_BASE}/eokul?tc={text}", f"E-Okul: {text}"
+        return f"{API_BASE}/eokul.php?tc={text}", f"E-Okul: {text}"
     elif tip == "adres":
-        return f"{API_BASE}/adres?tc={text}", f"Adres: {text}"
+        return f"{API_BASE}/adres.php?tc={text}", f"Adres: {text}"
     elif tip == "tapu":
-        return f"{API_BASE}/tapu?tc={text}", f"Tapu: {text}"
+        return f"{API_BASE}/tapu.php?tc={text}", f"Tapu: {text}"
     elif tip == "adaparsel":
         p = text.split()
         if len(p) < 2:
             return None, "❌ `İL İLÇE` şeklinde yazın!"
-        return f"{API_BASE}/adaparsel?il={p[0]}&ilce={p[1]}", f"Ada Parsel: {p[0]} {p[1]}"
+        return f"{API_BASE}/adaparsel.php?il={p[0]}&ilce={p[1]}", f"Ada Parsel: {p[0]} {p[1]}"
     return None, "❌ Bilinmeyen sorgu tipi"
 
 
@@ -471,7 +517,7 @@ def create_bot(token, is_clone=False):
         try:
             data = api_istek(url)
 
-            # ===== JSON DOSYASI OLARAK GÖNDER =====
+            # JSON dosyası oluştur (sadece veri)
             json_dosya = json_dosya_olustur(baslik, data)
 
             bot.delete_message(message.chat.id, islem.message_id)
@@ -489,7 +535,6 @@ def create_bot(token, is_clone=False):
                     reply_markup=sonuc_menu()
                 )
 
-            # Geçici dosyayı sil
             try:
                 os.remove(json_dosya)
             except:
